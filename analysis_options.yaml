@@ -1,0 +1,23 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - '**/*.g.dart'
+    - '**/*.freezed.dart'
+    - 'build/**'
+
+linter:
+  rules:
+    # Enforce good practices
+    always_use_package_imports: true
+    avoid_print: true
+    prefer_const_constructors: true
+    prefer_final_fields: true
+    require_trailing_commas: true
+
+    # Documentation
+    public_member_api_docs: false
+
+    # Flexibility (disable overly strict rules)
+    unnecessary_this: false
+    constant_identifier_names: false
