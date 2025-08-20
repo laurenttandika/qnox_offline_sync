@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
+
 import 'package:qnox_offline_sync/src/qnox_conflict.dart';
 import 'package:qnox_offline_sync/src/models/qnox_sync_status.dart';
 import 'package:qnox_offline_sync/src/models/qnox_sync_task.dart';
@@ -40,11 +41,13 @@ class QnoxSyncManager {
     await _connSub?.cancel();
   }
 
+  /// Run a sync cycle: drains due tasks with retry/backoff & conflict handling.
   Future<void> sync() async {
     _status(QnoxSyncPhase.syncing);
     while (true) {
       final tasks = await queue.due(limit: 20);
       if (tasks.isEmpty) break;
+
       for (final t in tasks) {
         try {
           await _dispatch(t);
@@ -56,7 +59,6 @@ class QnoxSyncManager {
           if (resolved) {
             await queue.success(t);
           } else {
-            // Defer and try again later
             await queue.retryLater(t);
           }
         } catch (e, st) {
@@ -65,7 +67,7 @@ class QnoxSyncManager {
             e,
             st,
           );
-          // Conservative: retry later
+          // Conservative fallback: retry later (can be adjusted if needed)
           await queue.retryLater(t);
         }
       }
@@ -83,9 +85,17 @@ class QnoxSyncManager {
       );
     } on DioException catch (e) {
       final code = e.response?.statusCode ?? 0;
-      if (code == 0) throw _QnoxRetryableException(); // likely offline
+
+      // No response (offline, DNS), timeouts etc. -> retryable
+      if (code == 0) throw _QnoxRetryableException();
+
+      // Server errors / throttling -> retryable
       if (code >= 500 || code == 429) throw _QnoxRetryableException();
+
+      // Versioning / ETag / business conflicts
       if (code == 409 || code == 412) throw _QnoxConflictException(e);
+
+      // 4xx other than above: not retryable; let caller decide (we rethrow)
       rethrow;
     }
   }
@@ -106,16 +116,19 @@ class QnoxSyncManager {
         } on DioException {
           return false;
         }
+
       case QnoxConflictStrategy.serverWins:
-        // Drop the local change (consider logging)
+        // Drop local change and move on.
         return true;
+
       case QnoxConflictStrategy.merge:
         if (mergeResolver == null) return false;
         try {
-          final server = await dio.get(_url(t.path));
+          final serverRes = await dio.get(_url(t.path));
+          final server = (serverRes.data as Map).cast<String, dynamic>();
           final merged = await mergeResolver!(
             local: t.data ?? {},
-            server: (server.data as Map).cast<String, dynamic>(),
+            server: server,
           );
           await dio.request(
             _url(t.path),
@@ -129,9 +142,13 @@ class QnoxSyncManager {
     }
   }
 
-  String _url(String path) => path.startsWith('http')
-      ? path
-      : '${baseUrl.replaceAll(RegExp(r"/$"), '')}/${path.replaceFirst(RegExp(r"^/"), '')}';
+  String _url(String path) {
+    // Allow absolute; otherwise join base + path cleanly
+    if (path.startsWith('http://') || path.startsWith('https://')) return path;
+    final b = baseUrl.replaceAll(RegExp(r'/$'), '');
+    final p = path.replaceFirst(RegExp(r'^/'), '');
+    return '$b/$p';
+  }
 
   void _status(QnoxSyncPhase p, {int? pending, String? message}) async {
     final count = pending ?? await queue.pending();

@@ -1,54 +1,50 @@
-import 'dart:math';
-import 'package:uuid/uuid.dart';
+import 'dart:async';
+import 'package:logging/logging.dart';
 import 'package:qnox_offline_sync/src/models/qnox_sync_task.dart';
 import 'package:qnox_offline_sync/src/storage/qnox_local_store.dart';
 
+/// Wraps the local storage to provide higher-level queue semantics
+/// (enqueue, mark success, retry later with exponential backoff).
 class QnoxRequestQueue {
   final QnoxLocalStore store;
-  final _uuid = const Uuid();
-  final Duration initialBackoff;
-  final Duration maxBackoff;
+  final _log = Logger('QnoxRequestQueue');
 
-  QnoxRequestQueue(this.store, {this.initialBackoff = const Duration(seconds: 3), this.maxBackoff = const Duration(minutes: 2)});
+  QnoxRequestQueue(this.store);
 
-  Future<String> enqueue({
-    required String method,
-    required String path,
-    Map<String, dynamic>? data,
-    Map<String, String>? headers,
-  }) async {
-    final id = _uuid.v4();
-    final task = QnoxSyncTask(
-      id: id,
-      method: method.toUpperCase(),
-      path: path,
-      data: data,
-      headers: headers,
-      createdAt: DateTime.now(),
-      retries: 0,
-      nextAttemptAt: DateTime.now(),
-    );
+  /// Adds a new task into the queue.
+  Future<void> enqueue(QnoxSyncTask task) async {
+    _log.fine('Enqueue task ${task.id} ${task.method} ${task.path}');
     await store.enqueue(task);
-    return id;
   }
 
-  Future<List<QnoxSyncTask>> due({int limit = 20}) => store.dueTasks(limit: limit);
-
-  Future<void> success(QnoxSyncTask t) => store.removeTask(t.id);
-
-  Future<void> retryLater(QnoxSyncTask t) async {
-    final nextDelay = _backoff(t.retries);
-    await store.updateTask(t.copyWith(
-      retries: t.retries + 1,
-      nextAttemptAt: DateTime.now().add(nextDelay),
-    ));
+  /// Returns tasks that are due to be retried/executed.
+  Future<List<QnoxSyncTask>> due({int limit = 20}) {
+    return store.dueTasks(limit: limit);
   }
 
-  Duration _backoff(int retries) {
-    final factor = pow(2, retries).toInt();
-    final next = initialBackoff * factor;
-    return next > maxBackoff ? maxBackoff : next;
+  /// Mark a task as successfully synced and remove from queue.
+  Future<void> success(QnoxSyncTask task) async {
+    _log.fine('Task success ${task.id}');
+    await store.removeTask(task.id);
   }
 
+  /// Mark a task to retry later, with exponential backoff.
+  Future<void> retryLater(QnoxSyncTask task) async {
+    final nextAttempt = DateTime.now().add(_backoffDuration(task.attempts));
+    final updated = task.copyWith(
+      attempts: task.attempts + 1,
+      nextAttemptAt: nextAttempt,
+    );
+    _log.fine('Retry later ${task.id}, attempts=${updated.attempts}');
+    await store.updateTask(updated);
+  }
+
+  /// How many tasks are still pending.
   Future<int> pending() => store.pendingCount();
+
+  Duration _backoffDuration(int attempts) {
+    // Exponential backoff: 2^attempts seconds, capped at 5 minutes
+    final secs = (1 << attempts).clamp(1, 300);
+    return Duration(seconds: secs);
+  }
 }

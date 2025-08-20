@@ -1,7 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import 'qnox_offline_sync_platform_interface.dart';
+import 'package:qnox_offline_sync/qnox_offline_sync_platform_interface.dart';
 
 /// The default MethodChannel-based implementation of [QnoxOfflineSyncPlatform].
 class MethodChannelQnoxOfflineSync extends QnoxOfflineSyncPlatform {

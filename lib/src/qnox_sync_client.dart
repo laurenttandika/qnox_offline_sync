@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'package:dio/dio.dart';
+import 'package:qnox_offline_sync/src/models/qnox_sync_status.dart';
+import 'package:qnox_offline_sync/src/models/qnox_sync_task.dart'; // ← add this
+import 'package:qnox_offline_sync/src/qnox_conflict.dart';
+import 'package:qnox_offline_sync/src/qnox_sync_manager.dart';
 import 'package:qnox_offline_sync/src/queue/qnox_request_queue.dart';
 import 'package:qnox_offline_sync/src/storage/qnox_local_store.dart';
 import 'package:qnox_offline_sync/src/storage/qnox_sembast_store.dart';
-import 'package:qnox_offline_sync/src/qnox_sync_manager.dart';
-import 'package:qnox_offline_sync/src/qnox_conflict.dart';
-import 'package:qnox_offline_sync/src/models/qnox_sync_status.dart';
 
 class QnoxSync {
   final String baseUrl;
@@ -14,7 +15,19 @@ class QnoxSync {
   late final QnoxRequestQueue _queue;
   late final QnoxSyncManager _manager;
 
-  QnoxSync._(this.baseUrl, this._dio, this._store);
+  // Auth & UA hooks
+  final Future<String?> Function()? _authTokenProvider;
+  final Future<bool> Function()? _refreshToken;
+  final String? _customUserAgent;
+
+  QnoxSync._(
+    this.baseUrl,
+    this._dio,
+    this._store,
+    this._authTokenProvider,
+    this._refreshToken,
+    this._customUserAgent,
+  );
 
   static Future<QnoxSync> create({
     required String baseUrl,
@@ -22,11 +35,71 @@ class QnoxSync {
     QnoxLocalStore? store,
     QnoxConflictStrategy conflictStrategy = QnoxConflictStrategy.clientWins,
     QnoxMergeResolver? mergeResolver,
+    Future<String?> Function()? authTokenProvider,
+    Future<bool> Function()? refreshToken,
+    String? userAgent,
   }) async {
     final client = dio ?? Dio(BaseOptions(baseUrl: baseUrl));
+
+    if (userAgent != null && userAgent.isNotEmpty) {
+      client.options.headers['User-Agent'] = userAgent;
+    }
+
+    if (authTokenProvider != null) {
+      client.interceptors.add(
+        InterceptorsWrapper(
+          onRequest: (options, handler) async {
+            final token = await authTokenProvider();
+            if (token != null && token.isNotEmpty) {
+              options.headers['Authorization'] = 'Bearer $token';
+            }
+            handler.next(options);
+          },
+        ),
+      );
+    }
+
+    if (refreshToken != null) {
+      client.interceptors.add(
+        InterceptorsWrapper(
+          onError: (DioException err, ErrorInterceptorHandler handler) async {
+            final response = err.response;
+            final req = err.requestOptions;
+
+            final alreadyRetried = req.extra['__qnox_retried'] == true;
+            if (response?.statusCode == 401 && !alreadyRetried) {
+              final ok = await refreshToken();
+              if (ok) {
+                if (authTokenProvider != null) {
+                  final token = await authTokenProvider();
+                  if (token != null && token.isNotEmpty) {
+                    req.headers['Authorization'] = 'Bearer $token';
+                  }
+                }
+                req.extra['__qnox_retried'] = true;
+                try {
+                  final replay = await client.fetch<dynamic>(req);
+                  return handler.resolve(replay);
+                } catch (_) {}
+              }
+            }
+            handler.next(err);
+          },
+        ),
+      );
+    }
+
     final s = store ?? QnoxSembastStore();
     await s.init();
-    final u = QnoxSync._(baseUrl, client, s);
+
+    final u = QnoxSync._(
+      baseUrl,
+      client,
+      s,
+      authTokenProvider,
+      refreshToken,
+      userAgent,
+    );
     u._queue = QnoxRequestQueue(s);
     u._manager = QnoxSyncManager(
       dio: client,
@@ -39,10 +112,8 @@ class QnoxSync {
     return u;
   }
 
-  /// Subscribe to sync status updates
   Stream<QnoxSyncStatus> get onSyncStatus => _manager.onStatus;
 
-  /// GET with optional cache-first behavior.
   Future<Response> get(
     String path, {
     Map<String, dynamic>? query,
@@ -78,7 +149,6 @@ class QnoxSync {
     return res;
   }
 
-  /// Queue mutations when offline. If request fails due to network/5xx, it will be queued and retried.
   Future<Response?> post(
     String path, {
     Map<String, dynamic>? data,
@@ -153,24 +223,36 @@ class QnoxSync {
         options: Options(method: method, headers: headers),
       );
       return res;
-    } catch (e) {
-      if (!offlineQueue) rethrow;
-      // Enqueue and return null (fire-and-forget); app can listen to onSyncStatus
-      await _queue.enqueue(
-        method: method,
-        path: path,
-        data: data,
-        headers: headers,
-      );
-      return null;
+    } on DioException catch (e) {
+      final code = e.response?.statusCode ?? 0;
+      final isNetwork = code == 0;
+      final retryable = isNetwork || code >= 500 || code == 429;
+
+      if (offlineQueue && retryable) {
+        // FIX: construct a task and enqueue it
+        final task = QnoxSyncTask.newTask(
+          method: method,
+          path: path,
+          data: data,
+          headers: headers,
+        );
+        await _queue.enqueue(task);
+        return null;
+      }
+
+      rethrow;
     }
   }
 
-  String _cacheKey(String path, Map<String, dynamic>? query) => [
-    path,
-    if (query != null)
-      query.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
-  ].join('|');
+  String _cacheKey(String path, Map<String, dynamic>? query) {
+    final parts = <String>[path];
+    if (query != null && query.isNotEmpty) {
+      final entries = query.entries.toList()
+        ..sort((a, b) => a.key.compareTo(b.key));
+      parts.add(entries.map((e) => '${e.key}=${e.value}').join('&'));
+    }
+    return parts.join('|');
+  }
 
   Future<void> dispose() async {
     await _manager.stop();

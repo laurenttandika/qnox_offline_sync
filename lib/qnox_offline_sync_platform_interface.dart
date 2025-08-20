@@ -1,6 +1,5 @@
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
-
-import 'qnox_offline_sync_method_channel.dart';
+import 'package:qnox_offline_sync/qnox_offline_sync_method_channel.dart';
 
 abstract class QnoxOfflineSyncPlatform extends PlatformInterface {
   QnoxOfflineSyncPlatform() : super(token: _token);
