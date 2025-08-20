@@ -1,9 +1,9 @@
 name: qnox_offline_sync
 description: "Offline-first sync for Flutter. Local cache, durable mutation queue, smart retries, conflict resolution."
 version: 0.1.0
-homepage: https://github.com/qnoxhq/qnox_offline_sync
-repository: https://github.com/qnoxhq/qnox_offline_sync
-issue_tracker: https://github.com/qnoxhq/qnox_offline_sync/issues
+homepage: https://github.com/laurenttandika/qnox_offline_sync
+repository: https://github.com/laurenttandika/qnox_offline_sync
+issue_tracker: https://github.com/laurenttandika/qnox_offline_sync/issues
 
 environment:
   sdk: ^3.9.0
